@@ -47,6 +47,7 @@ require("kong.globalpatches")()
 local ip = require "kong.tools.ip"
 local DB = require "kong.db"
 local dns = require "kong.tools.dns"
+local mock = require "kong.runloop.mock"
 local utils = require "kong.tools.utils"
 local lapis = require "lapis"
 local runloop = require "kong.runloop.handler"
@@ -66,6 +67,7 @@ local ngx_log          = ngx.log
 local ngx_ERR          = ngx.ERR
 local ngx_CRIT         = ngx.CRIT
 local ngx_DEBUG        = ngx.DEBUG
+local pairs            = pairs
 local ipairs           = ipairs
 local assert           = assert
 local tostring         = tostring
@@ -297,16 +299,21 @@ function Kong.init_worker()
   end
 end
 
-function Kong.ssl_certificate()
+function Kong.ssl_certificate(is_mock)
   local ctx = ngx.ctx
-  runloop.certificate.before(ctx)
+  runloop.certificate.before(ctx, is_mock)
 
-  for plugin, plugin_conf in plugins_iterator(singletons.loaded_plugins, true) do
-    plugin.handler:certificate(plugin_conf)
+  if is_mock then
+    mock.ssl_certificate(ctx)
+
+  else
+    for plugin, plugin_conf in plugins_iterator(singletons.loaded_plugins, true) do
+      plugin.handler:certificate(plugin_conf)
+    end
   end
 end
 
-function Kong.balancer()
+function Kong.balancer(is_mock)
   local ctx = ngx.ctx
   local addr = ctx.balancer_address
   local tries = addr.tries
@@ -314,7 +321,7 @@ function Kong.balancer()
   addr.try_count = addr.try_count + 1
   tries[addr.try_count] = current_try
 
-  runloop.balancer.before()
+  runloop.balancer.before(ctx, is_mock)
 
   if addr.try_count > 1 then
     -- only call balancer on retry, first one is done in `runloop.access.after` which runs
@@ -326,7 +333,7 @@ function Kong.balancer()
     previous_try.state, previous_try.code = get_last_failure()
 
     -- Report HTTP status for health checks
-    if addr.balancer then
+    if addr.balancer and not is_mock then
       if previous_try.state == "failed" then
         addr.balancer.report_tcp_failure(addr.ip, addr.port)
       else
@@ -349,17 +356,24 @@ function Kong.balancer()
     end
   end
 
-  current_try.ip   = addr.ip
-  current_try.port = addr.port
+  local ip   = addr.ip
+  local port = addr.port
+
+  current_try.ip   = ip
+  current_try.port = port
+
+  if is_mock then
+    ip, port = mock.address()
+  end
 
   -- set the targets as resolved
   ngx_log(ngx_DEBUG, "setting address (try ", addr.try_count, "): ",
-                     addr.ip, ":", addr.port)
-  local ok, err = set_current_peer(addr.ip, addr.port)
+                     ip, ":", port)
+
+  local ok, err = set_current_peer(ip, port)
   if not ok then
     ngx_log(ngx_ERR, "failed to set the current peer (address: ",
-            tostring(addr.ip), " port: ", tostring(addr.port),"): ",
-            tostring(err))
+            tostring(ip), " port: ", tostring(port),"): ", tostring(err))
     return ngx.exit(500)
   end
 
@@ -370,36 +384,46 @@ function Kong.balancer()
     ngx_log(ngx_ERR, "could not set upstream timeouts: ", err)
   end
 
-  runloop.balancer.after()
+  runloop.balancer.after(ctx, is_mock)
 end
 
-function Kong.rewrite()
+function Kong.rewrite(is_mock)
   local ctx = ngx.ctx
-  runloop.rewrite.before(ctx)
+  runloop.rewrite.before(ctx, is_mock)
 
-  -- we're just using the iterator, as in this rewrite phase no consumer nor
-  -- api will have been identified, hence we'll just be executing the global
-  -- plugins
-  for plugin, plugin_conf in plugins_iterator(singletons.loaded_plugins, true) do
-    plugin.handler:rewrite(plugin_conf)
+  if is_mock then
+    mock.rewrite(ctx)
+
+  else
+    -- we're just using the iterator, as in this rewrite phase no consumer nor
+    -- api will have been identified, hence we'll just be executing the global
+    -- plugins
+    for plugin, plugin_conf in plugins_iterator(singletons.loaded_plugins, true) do
+      plugin.handler:rewrite(plugin_conf)
+    end
   end
 
-  runloop.rewrite.after(ctx)
+  runloop.rewrite.after(ctx, is_mock)
 end
 
-function Kong.access()
+function Kong.access(is_mock)
   local ctx = ngx.ctx
 
-  runloop.access.before(ctx)
+  runloop.access.before(ctx, is_mock)
 
   ctx.delay_response = true
 
-  for plugin, plugin_conf in plugins_iterator(singletons.loaded_plugins, true) do
-    if not ctx.delayed_response then
-      local err = coroutine.wrap(plugin.handler.access)(plugin.handler, plugin_conf)
-      if err then
-        ctx.delay_response = false
-        return responses.send_HTTP_INTERNAL_SERVER_ERROR(err)
+  if is_mock then
+    mock.access(ctx)
+
+  else
+    for plugin, plugin_conf in plugins_iterator(singletons.loaded_plugins, true) do
+      if not ctx.delayed_response then
+        local err = coroutine.wrap(plugin.handler.access)(plugin.handler, plugin_conf)
+        if err then
+          ctx.delay_response = false
+          return responses.send_HTTP_INTERNAL_SERVER_ERROR(err)
+        end
       end
     end
   end
@@ -410,40 +434,57 @@ function Kong.access()
 
   ctx.delay_response = false
 
-  runloop.access.after(ctx)
+  runloop.access.after(ctx, is_mock)
 end
 
-function Kong.header_filter()
+function Kong.header_filter(is_mock)
   local ctx = ngx.ctx
-  runloop.header_filter.before(ctx)
+  runloop.header_filter.before(ctx, is_mock)
 
-  for plugin, plugin_conf in plugins_iterator(singletons.loaded_plugins) do
-    plugin.handler:header_filter(plugin_conf)
+  if is_mock then
+    mock.header_filter(ctx)
+
+  else
+    for plugin, plugin_conf in plugins_iterator(singletons.loaded_plugins) do
+      plugin.handler:header_filter(plugin_conf)
+    end
   end
 
-  runloop.header_filter.after(ctx)
+  runloop.header_filter.after(ctx, is_mock)
 end
 
-function Kong.body_filter()
+function Kong.body_filter(is_mock)
   local ctx = ngx.ctx
-  for plugin, plugin_conf in plugins_iterator(singletons.loaded_plugins) do
-    plugin.handler:body_filter(plugin_conf)
+
+  if is_mock then
+    mock.body_filter(ctx)
+
+  else
+    for plugin, plugin_conf in plugins_iterator(singletons.loaded_plugins) do
+      plugin.handler:body_filter(plugin_conf)
+    end
   end
 
-  runloop.body_filter.after(ctx)
+  runloop.body_filter.after(ctx, is_mock)
 end
 
-function Kong.log()
+function Kong.log(is_mock)
   local ctx = ngx.ctx
-  for plugin, plugin_conf in plugins_iterator(singletons.loaded_plugins) do
-    plugin.handler:log(plugin_conf)
+
+  if is_mock then
+    mock.log(ctx)
+
+  else
+    for plugin, plugin_conf in plugins_iterator(singletons.loaded_plugins) do
+      plugin.handler:log(plugin_conf)
+    end
   end
 
-  runloop.log.after(ctx)
+  runloop.log.after(ctx, is_mock)
 end
 
-function Kong.handle_error()
-  return kong_error_handlers(ngx)
+function Kong.handle_error(is_mock)
+  return kong_error_handlers(ngx, is_mock)
 end
 
 function Kong.serve_admin_api(options)
