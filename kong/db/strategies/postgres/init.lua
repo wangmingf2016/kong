@@ -16,6 +16,8 @@ local error         = error
 local upper         = string.upper
 local null          = ngx.null
 local load          = load
+local next          = next
+local type          = type
 local find          = string.find
 local rep           = string.rep
 local sub           = string.sub
@@ -27,6 +29,12 @@ local log           = ngx.log
 local NOTICE        = ngx.NOTICE
 local LIMIT         = {}
 local UNIQUE        = {}
+local COMPLEX_TYPES = {
+  array  = true,
+  set    = true,
+  record = true,
+  map    = true,
+}
 
 
 local new_tab
@@ -94,10 +102,22 @@ local function compile(name, query)
 end
 
 
-local function expand(name, map)
+local function expand(name, map, complex_types)
   local h = {}
   local n = 1
-  local c = { "local _ = ... or {}\n" }
+  local c = { "local r = ... or {}\n" }
+  for _, field_name in ipairs(complex_types) do
+    c[n+1] = 'if type(r["'
+    c[n+2] = field_name
+    c[n+3] = '"]) == "table" and not next(r["'
+    c[n+4] = field_name
+    c[n+5] = '"]) then\n'
+    c[n+6] = '  r["'
+    c[n+7] = field_name
+    c[n+8] = '"] = null\n'
+    c[n+9] = "end\n"
+    n=n+9
+  end
   for _, field in ipairs(map) do
     local entity = field.entity
     if not h[entity] then
@@ -106,7 +126,7 @@ local function expand(name, map)
       n=n+1
       for _, key in ipairs(map) do
         if entity == key.entity then
-          c[n+1] = '_["'
+          c[n+1] = 'r["'
           c[n+2] = field.from
           c[n+3] = '"] ~= null'
           c[n+4] = " and "
@@ -114,7 +134,7 @@ local function expand(name, map)
         end
       end
       c[n] = " then\n"
-      c[n+1] = '  \n  _["'
+      c[n+1] = '  \n  r["'
       c[n+2] = entity
       c[n+3] = '"] = {\n'
       n=n+3
@@ -122,28 +142,27 @@ local function expand(name, map)
         if entity == key.entity then
           c[n+1] = '    ["'
           c[n+2] = field.to
-          c[n+3] = '"] = '
-          c[n+4] = '_["'
-          c[n+5] = field.from
-          c[n+6] = '"],\n'
-          n=n+6
+          c[n+3] = '"] = r["'
+          c[n+4] = field.from
+          c[n+5] = '"],\n'
+          n=n+5
         end
       end
       c[n+1] = "  }\n\n"
       c[n+2] = "else\n"
-      c[n+3] = '  _["'
+      c[n+3] = '  r["'
       c[n+4] = field.entity
       c[n+5] = '"] = null\n'
       c[n+6] = "end\n"
-      c[n+7] = '_["'
+      c[n+7] = 'r["'
       c[n+8] = field.from
       c[n+9] = '"] = nil\n'
       n=n+9
     end
   end
-  c[n+1] = "return _"
+  c[n+1] = "return r"
 
-  return load(concat(c), "=" .. name, "t", { null = null })
+  return load(concat(c), "=" .. name, "t", { null = null, next = next, type = type })
 end
 
 
@@ -877,6 +896,9 @@ function _M.new(connector, schema, errors)
   local foreign_key_map               = {}
   local foreign_keys                  = {}
 
+  local complex_types_count           = 0
+  local complex_types                 = {}
+
   local unique_fields_count           = 0
   local unique_fields                 = {}
 
@@ -1014,6 +1036,11 @@ function _M.new(connector, schema, errors)
       end
 
     else
+      if COMPLEX_TYPES[field.type] then
+        complex_types_count = complex_types_count + 1
+        complex_types[complex_types_count] = field_name
+      end
+
       fields_hash[field_name]        = field
 
       local name_escaped             = escape_identifier(connector, field_name)
@@ -1290,9 +1317,7 @@ function _M.new(connector, schema, errors)
     connector          = connector,
     schema             = schema,
     errors             = errors,
-    expand             = foreign_key_count > 0 and
-                         expand(table_name .. "_expand", foreign_key_map) or
-                         noop,
+    expand             = expand(table_name .. "_expand", foreign_key_map, complex_types),
     collapse           = collapse(table_name .. "_collapse", foreign_key_map),
     [PRIVATE]          = {
       fields           = fields_hash,
