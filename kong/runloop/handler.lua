@@ -8,9 +8,11 @@
 -- In the `access_by_lua` phase, it is responsible for retrieving the route being proxied by
 -- a consumer. Then it is responsible for loading the plugins to execute on this request.
 local ck          = require "resty.cookie"
+local meta        = require "kong.meta"
 local utils       = require "kong.tools.utils"
 local Router      = require "kong.router"
 local ApiRouter   = require "kong.api_router"
+local errors      = require "kong.errors"
 local reports     = require "kong.reports"
 local balancer    = require "kong.runloop.balancer"
 local constants   = require "kong.constants"
@@ -19,6 +21,7 @@ local singletons  = require "kong.singletons"
 local certificate = require "kong.runloop.certificate"
 
 
+local tonumber    = tonumber
 local tostring    = tostring
 local sub         = string.sub
 local lower       = string.lower
@@ -29,7 +32,6 @@ local log         = ngx.log
 local null        = ngx.null
 local ngx_now     = ngx.now
 local update_time = ngx.update_time
-local re_match    = ngx.re.match
 local unpack      = unpack
 
 
@@ -43,7 +45,6 @@ local EMPTY_T = {}
 
 local router, router_version, router_err
 local api_router, api_router_version, api_router_err
-local server_header = _KONG._NAME .. "/" .. _KONG._VERSION
 
 
 local function get_now()
@@ -693,24 +694,35 @@ return {
   },
   header_filter = {
     before = function(ctx)
+      local now = get_now()
+      ctx.KONG_HEADER_FILTER_STARTED_AT = now
+
+      if not ctx.KONG_PROXIED then
+        errors.header_filter(ctx)
+        return
+      end
+
       local var = ngx.var
       local header = ngx.header
 
-      if ctx.KONG_PROXIED then
-        local now = get_now()
-        -- time spent waiting for a response from upstream
-        ctx.KONG_WAITING_TIME             = now - ctx.KONG_ACCESS_ENDED_AT
-        ctx.KONG_HEADER_FILTER_STARTED_AT = now
+      -- time spent waiting for a response from upstream
+      ctx.KONG_WAITING_TIME = now - ctx.KONG_ACCESS_ENDED_AT
 
+      local upstream_status = var.upstream_status
+      if upstream_status then
+        upstream_status = tonumber(sub(upstream_status, -3))
+      end
+
+      if not upstream_status or
+             upstream_status == 502 or
+             upstream_status == 503 or
+             upstream_status == 504 then
+        errors.header_filter(ctx)
+
+      else
         local upstream_status_header = constants.HEADERS.UPSTREAM_STATUS
         if singletons.configuration.enabled_headers[upstream_status_header] then
-          local matches, err = re_match(var.upstream_status, "[0-9]+$", "oj")
-          if err then
-            log(ERR, "failed to set ", upstream_status_header, " header: ", err)
-
-          elseif matches then
-            header[upstream_status_header] = matches[0]
-          end
+            header[upstream_status_header] = upstream_status
         end
 
         local hash_cookie = ctx.balancer_data.hash_cookie
@@ -720,7 +732,7 @@ return {
 
           if not ok then
             log(ngx.WARN, "failed to set the cookie for hash-based load balancing: ", err,
-                          " (key=", hash_cookie.key,
+                          " (key=",  hash_cookie.key,
                           ", path=", hash_cookie.path, ")")
           end
         end
@@ -739,12 +751,12 @@ return {
         end
 
         if singletons.configuration.enabled_headers[constants.HEADERS.VIA] then
-          header[constants.HEADERS.VIA] = server_header
+          header[constants.HEADERS.VIA] = meta._SERVER_TOKENS
         end
 
       else
         if singletons.configuration.enabled_headers[constants.HEADERS.SERVER] then
-          header[constants.HEADERS.SERVER] = server_header
+          header[constants.HEADERS.SERVER] = meta._SERVER_TOKENS
 
         else
           header[constants.HEADERS.SERVER] = nil
@@ -753,32 +765,39 @@ return {
     end
   },
   body_filter = {
+    before = function(ctx)
+      errors.body_filter(ctx)
+    end,
     after = function(ctx)
-      if ngx.arg[2] then
-        local now = get_now()
-        ctx.KONG_BODY_FILTER_ENDED_AT = now
+      if not ngx.arg[2] then
+        return
+      end
 
-        if ctx.KONG_PROXIED then
-          -- time spent receiving the response (header_filter + body_filter)
-          -- we could use $upstream_response_time but we need to distinguish the waiting time
-          -- from the receiving time in our logging plugins (especially ALF serializer).
-          ctx.KONG_RECEIVE_TIME = now - ctx.KONG_HEADER_FILTER_STARTED_AT
-        end
+      local now = get_now()
+      ctx.KONG_BODY_FILTER_ENDED_AT = now
+
+      if ctx.KONG_PROXIED then
+        -- time spent receiving the response (header_filter + body_filter)
+        -- we could use $upstream_response_time but we need to distinguish the waiting time
+        -- from the receiving time in our logging plugins (especially ALF serializer).
+        ctx.KONG_RECEIVE_TIME = now - ctx.KONG_HEADER_FILTER_STARTED_AT
       end
     end
   },
   log = {
     after = function(ctx)
       reports.log()
-      local balancer_data = ctx.balancer_data
 
-      -- If response was produced by an upstream (ie, not by a Kong plugin)
-      if ctx.KONG_PROXIED == true then
-        -- Report HTTP status for health checks
-        if balancer_data and balancer_data.balancer and balancer_data.ip then
-          balancer_data.balancer.report_http_status(balancer_data.ip,
-                                                    balancer_data.port, ngx.status)
-        end
+      if not ctx.KONG_PROXIED then
+        return
+      end
+
+      -- If response was produced by an upstream (ie, not by a Kong plugin),
+      -- report HTTP status for health checks
+      local balancer_data = ctx.balancer_data
+      if balancer_data and balancer_data.balancer and balancer_data.ip then
+        balancer_data.balancer.report_http_status(balancer_data.ip,
+                                                  balancer_data.port, ngx.status)
       end
     end
   }

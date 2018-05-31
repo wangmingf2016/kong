@@ -1,8 +1,6 @@
 local helpers = require "spec.helpers"
 local constants = require "kong.constants"
-
-
-local default_server_header = _KONG._NAME .. "/" .. _KONG._VERSION
+local meta = require "kong.meta"
 
 
 local function start(config)
@@ -56,8 +54,8 @@ describe("Server Tokens", function()
       })
 
       assert.res_status(200, res)
-      assert.not_equal(default_server_header, res.headers["server"])
-      assert.equal(default_server_header, res.headers["via"])
+      assert.not_equal(meta._SERVER_TOKENS, res.headers["server"])
+      assert.equal(meta._SERVER_TOKENS, res.headers["via"])
     end)
 
     it("should return Kong 'Server' header but not the Kong 'Via' header when no API matched (no proxy)", function()
@@ -70,7 +68,7 @@ describe("Server Tokens", function()
       })
 
       assert.res_status(404, res)
-      assert.equal(default_server_header, res.headers["server"])
+      assert.equal(meta._SERVER_TOKENS, res.headers["server"])
       assert.is_nil(res.headers["via"])
     end)
 
@@ -95,8 +93,8 @@ describe("Server Tokens", function()
       })
 
       assert.res_status(200, res)
-      assert.not_equal(default_server_header, res.headers["server"])
-      assert.equal(default_server_header, res.headers["via"])
+      assert.not_equal(meta._SERVER_TOKENS, res.headers["server"])
+      assert.equal(meta._SERVER_TOKENS, res.headers["via"])
     end)
 
     it("should return Kong 'Server' header but not the Kong 'Via' header when no API matched (no proxy)", function()
@@ -109,7 +107,7 @@ describe("Server Tokens", function()
       })
 
       assert.res_status(404, res)
-      assert.equal(default_server_header, res.headers["server"])
+      assert.equal(meta._SERVER_TOKENS, res.headers["server"])
       assert.is_nil(res.headers["via"])
     end)
 
@@ -136,7 +134,7 @@ describe("Server Tokens", function()
       assert.res_status(200, res)
       assert.response(res).has.header "server"
       assert.response(res).has_not.header "via"
-      assert.not_equal(default_server_header, res.headers["server"])
+      assert.not_equal(meta._SERVER_TOKENS, res.headers["server"])
     end)
 
     it("should not return Kong 'Server' or 'Via' headers when no API matched (no proxy)", function()

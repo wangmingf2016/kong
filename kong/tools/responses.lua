@@ -23,9 +23,6 @@ local meta = require "kong.meta"
 
 local type = type
 
---local server_header = _KONG._NAME .. "/" .. _KONG._VERSION
-local server_header = meta._NAME .. "/" .. meta._VERSION
-
 --- Define the most common HTTP status codes for sugar methods.
 -- Each of those status will generate a helper method (sugar)
 -- attached to this exported module prefixed with `send_`.
@@ -123,7 +120,7 @@ local function send_response(status_code)
     end
 
     ngx.status = status_code
-    ngx.header["Server"] = server_header
+    ngx.header["Server"] = meta._SERVER_TOKENS
 
     if headers then
       for k, v in pairs(headers) do
