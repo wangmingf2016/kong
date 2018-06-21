@@ -417,9 +417,8 @@ local function check_target_history(upstream, balancer)
   -- compare balancer history with db-loaded history
   local last_equal_index = 0  -- last index where history is the same
   for i, entry in ipairs(old_history) do
-    if new_history[i] and entry.order == new_history[i].order then
-      last_equal_index = i
-    else
+    if entry.order ~= (new_history[i] or EMPTY_T).order then
+      last_equal_index = i - 1
       break
     end
   end
@@ -820,7 +819,7 @@ end
 
 --------------------------------------------------------------------------------
 -- Update health status and broadcast to workers
--- @param upstream a table with upstream data: must have `name` and `id`
+-- @param upstream a table with upstream data
 -- @param hostname target hostname
 -- @param port target port
 -- @param is_healthy boolean: true if healthy, false if unhealthy
